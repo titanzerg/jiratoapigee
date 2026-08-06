@@ -125,3 +125,26 @@ gcloud auth login
 gcloud config set project gcp-pttep-th-it-apimgmt
 python3 add_apigee_proxy_name.py --source api
 ```
+
+mode นี้จะเพิ่ม column `confident` โดยเทียบ path ใน swagger attachment ของ Jira card
+กับ path จาก flow condition ใน Apigee revision bundle
+
+ตอนใช้ `--source api` สคริปต์จะ cache revision bundle zip ไว้ใน folder:
+
+```text
+apigee_bundle_cache/
+```
+
+และ cache swagger paths จาก Jira ไว้ใน folder:
+
+```text
+jira_swagger_path_cache/
+```
+
+รอบถัดไปจะอ่านจาก folder cache ก่อน ถ้าไม่มีไฟล์ค่อยโหลดใหม่
+
+เปลี่ยน cache folder ได้:
+
+```bash
+python3 add_apigee_proxy_name.py --source api --bundle-cache-dir /path/to/bundle-cache --swagger-cache-dir /path/to/swagger-cache
+```
