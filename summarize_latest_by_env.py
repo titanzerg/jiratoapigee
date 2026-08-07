@@ -52,11 +52,20 @@ def split_basepaths(value: str) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
     for item in value.split(","):
-        path = item.strip()
+        path = normalize_basepath(item)
         if path and path not in seen:
             seen.add(path)
             paths.append(path)
     return paths
+
+
+def normalize_basepath(value: str) -> str:
+    cleaned = value.strip().rstrip("/")
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    return cleaned
 
 
 def latest_by_env(input_path: str) -> dict[str, dict[str, dict[str, Any]]]:

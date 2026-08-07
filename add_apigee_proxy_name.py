@@ -649,12 +649,14 @@ def add_proxy_to_env_files(
             fieldnames = list(reader.fieldnames or [])
             for row in reader:
                 basepath = normalize_basepath(row.get("base path", ""))
+                row["base path"] = basepath
                 row["proxy"] = ", ".join(proxy_map.get(basepath, []))
                 if row["proxy"].strip():
                     cards_with_proxy.add(row.get("card", "").strip())
                 input_rows.append(row)
 
         count = 0
+        written_basepaths: set[str] = set()
         ensure_parent_dir(output_path)
         with open(input_path, newline="", encoding="utf-8-sig") as source, open(
             output_path, "w", newline="", encoding="utf-8-sig"
@@ -668,12 +670,15 @@ def add_proxy_to_env_files(
             writer = csv.DictWriter(output, fieldnames=fieldnames)
             writer.writeheader()
             for row in input_rows:
+                basepath = normalize_basepath(row.get("base path", ""))
+                if basepath in written_basepaths:
+                    continue
                 if not row.get("proxy", "").strip() and row.get("card", "").strip() in cards_with_proxy:
                     continue
                 count += 1
                 if with_confidence and count % 50 == 0:
                     print(f"{env}: processed {count} row(s)", file=sys.stderr)
-                basepath = normalize_basepath(row.get("base path", ""))
+                written_basepaths.add(basepath)
                 if with_confidence:
                     row["confident"] = calculate_confidence(
                         basepath,

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import io
 import os
 import sys
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -18,9 +20,12 @@ from add_apigee_proxy_name import (
     ProxyInfo,
     build_proxy_info_from_db,
     compare_path,
+    extract_condition_paths,
+    extract_xml_basepaths,
     get_access_token,
     get_jira_swagger_paths,
     get_revision_bundle_flow_paths,
+    read_or_download_revision_bundle,
     normalize_basepath,
     remove_basepath_prefix,
 )
@@ -43,7 +48,7 @@ class ProxyScore:
     proxy: str
     confidence: int
     desc_basepath: str
-    basepath_score: int
+    basepath_score: tuple[int, int, int, int]
 
 
 def parse_args() -> argparse.Namespace:
@@ -146,6 +151,36 @@ def build_flow_index(
     return index
 
 
+def build_basepath_flow_index(
+    proxy_infos: list[ProxyInfo],
+    org: str,
+    token: str,
+    bundle_cache_dir: str,
+) -> dict[ProxyInfo, dict[str, set[str]]]:
+    index: dict[ProxyInfo, dict[str, set[str]]] = {}
+    for info in proxy_infos:
+        bundle = read_or_download_revision_bundle(org, token, info.proxy, info.revision, bundle_cache_dir)
+        if not bundle:
+            continue
+        basepath_paths: dict[str, set[str]] = {}
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            for name in archive.namelist():
+                if not name.endswith(".xml") or "/proxies/" not in name:
+                    continue
+                content = archive.read(name).decode("utf-8", errors="replace")
+                basepaths = extract_xml_basepaths(content)
+                if not basepaths:
+                    continue
+                flow_paths = {compare_path(path) for path in extract_condition_paths(content) if compare_path(path)}
+                if not flow_paths:
+                    continue
+                for basepath in basepaths:
+                    basepath_paths.setdefault(normalize_basepath(basepath), set()).update(flow_paths)
+        if basepath_paths:
+            index[info] = basepath_paths
+    return index
+
+
 def score_proxy(swagger_paths: list[str], basepaths: set[str], apigee_paths: set[str]) -> int:
     comparable_swagger: set[str] = set()
     for path in swagger_paths:
@@ -168,6 +203,7 @@ def guess_for_card(
     card: str,
     basepaths: set[str],
     flow_index: dict[ProxyInfo, set[str]],
+    basepath_flow_index: dict[ProxyInfo, dict[str, set[str]]],
     proxy_basepaths: dict[str, list[str]],
     env_file: str,
     swagger_cache_dir: str,
@@ -185,6 +221,7 @@ def guess_for_card(
             swagger_paths,
             proxy_basepaths.get(info.proxy, []),
             apigee_paths,
+            basepath_flow_index.get(info, {}),
         )
         if confidence > best.confidence:
             best = Guess(
@@ -200,7 +237,7 @@ def guess_for_card(
         best_basepath_score = max(item.basepath_score for item in tied)
         best_tied = [item for item in tied if item.basepath_score == best_basepath_score]
         best.proxy = ", ".join(sorted({item.proxy for item in best_tied}))
-        best.desc_basepath = format_desc_basepath([item.desc_basepath.removeprefix("basepath: ").strip() for item in best_tied])
+        best.desc_basepath = sorted(item.desc_basepath for item in best_tied if item.desc_basepath)[0]
     return best
 
 
@@ -208,25 +245,36 @@ def best_desc_basepath_for_proxy(
     swagger_paths: list[str],
     proxy_basepaths: list[str],
     apigee_paths: set[str],
-) -> tuple[str, int]:
-    best_basepath = ""
-    best_score = -1
+    basepath_flow_paths: dict[str, set[str]],
+) -> tuple[str, tuple[int, int, int, int]]:
+    scored: list[tuple[tuple[int, int, int, int], str]] = []
     for basepath in proxy_basepaths:
-        score = score_basepath(swagger_paths, basepath, apigee_paths)
         normalized = normalize_basepath(basepath)
-        if score > best_score or (score == best_score and len(normalized) > len(best_basepath)):
-            best_basepath = normalized
-            best_score = score
+        if basepath_flow_paths:
+            paths_for_basepath = basepath_flow_paths.get(normalized, set())
+        else:
+            paths_for_basepath = apigee_paths
+        score = score_basepath(swagger_paths, normalized, paths_for_basepath)
+        scored.append((score, normalized))
+    if not scored:
+        return "", (0, 0, 0, 0)
+
+    best_score, best_basepath = max(scored, key=lambda item: (item[0], -len(item[1]), item[1]))
     return format_desc_basepath([best_basepath]), best_score
 
 
-def score_basepath(swagger_paths: list[str], basepath: str, apigee_paths: set[str]) -> int:
+def score_basepath(swagger_paths: list[str], basepath: str, apigee_paths: set[str]) -> tuple[int, int, int, int]:
     normalized = normalize_basepath(basepath)
-    comparable = [compare_path(remove_basepath_prefix(path, normalized)) for path in swagger_paths]
-    matched_paths = sum(1 for path in comparable if path in apigee_paths)
+    comparable = {
+        compare_path(remove_basepath_prefix(path, normalized))
+        for path in swagger_paths
+        if compare_path(remove_basepath_prefix(path, normalized))
+    }
+    matched_paths = len(comparable & apigee_paths)
+    confidence = round((matched_paths / len(comparable)) * 100) if comparable and apigee_paths else 0
     prefix_hits = sum(1 for path in swagger_paths if compare_path(path).startswith(compare_path(normalized + "/")))
     exact_hits = sum(1 for path in swagger_paths if compare_path(path) == compare_path(normalized))
-    return (matched_paths * 1000) + (prefix_hits * 10) + exact_hits + len(normalized)
+    return (confidence, matched_paths, prefix_hits, exact_hits)
 
 
 def format_desc_basepath(basepaths: list[str]) -> str:
@@ -240,6 +288,8 @@ def format_desc_basepath(basepaths: list[str]) -> str:
     if not unique:
         return ""
     return "basepath: " + ", ".join(unique)
+
+
 
 
 def write_output(path: str, rows: list[dict[str, str]]) -> None:
@@ -289,6 +339,7 @@ def main() -> int:
         print("warning: continuing with existing Apigee bundle cache only", file=sys.stderr)
         token = ""
     flow_index = build_flow_index(proxy_infos, args.org, token, args.bundle_cache_dir)
+    basepath_flow_index = build_basepath_flow_index(proxy_infos, args.org, token, args.bundle_cache_dir)
     print(f"Loaded comparable flow paths for {len(flow_index)} proxy revision(s)")
 
     rows: list[dict[str, str]] = []
@@ -301,6 +352,7 @@ def main() -> int:
             card,
             basepaths,
             flow_index,
+            basepath_flow_index,
             proxy_basepaths,
             args.env_file,
             args.swagger_cache_dir,

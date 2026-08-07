@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch update Jira basepath descriptions from guess_missing_proxy output."""
+"""Batch update Jira basepath descriptions from low-confidence basepath guess output."""
 
 from __future__ import annotations
 
@@ -41,13 +41,13 @@ put_issue_description = UPDATEBASEPATH.put_issue_description
 update_description_adf = UPDATEBASEPATH.update_description_adf
 
 
-DEFAULT_INPUT = "data/guess_missing_proxy/jira_missing_proxy_guess.csv"
+DEFAULT_INPUT = "data/guess_low_confidence_basepath/jira_low_confidence_basepath_guess.csv"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch update Jira issue description basepath from guess CSV.")
     parser.add_argument("--input", default=DEFAULT_INPUT)
-    parser.add_argument("--confident", type=int, default=80, help="Minimum confident percent, inclusive.")
+    parser.add_argument("--confident", type=int, default=80, help="Minimum guess_confident percent, inclusive.")
     parser.add_argument("--apply", action="store_true", help="Actually update Jira. Default is dry-run.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum rows to process. Use 0 for no limit.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between Jira updates.")
@@ -67,6 +67,8 @@ def desc_basepath_value(value: str) -> str:
     cleaned = value.strip()
     if cleaned.lower().startswith("basepath:"):
         cleaned = cleaned.split(":", 1)[1].strip()
+    if "," in cleaned:
+        return ""
     return normalize_basepath(cleaned)
 
 
@@ -75,13 +77,14 @@ def candidate_rows(path: str, min_confidence: int) -> list[dict[str, str]]:
     with open(path, newline="", encoding="utf-8-sig") as source:
         reader = csv.DictReader(source)
         for row in reader:
-            if confidence_value(row.get("confident", "")) < min_confidence:
+            confidence = row.get("guess_confident", "") or row.get("confident", "")
+            if confidence_value(confidence) < min_confidence:
                 continue
-            basepath = desc_basepath_value(row.get("desc_basepath", ""))
-            card = row.get("card", "").strip()
+            basepath = desc_basepath_value(row.get("guess_basepath", "") or row.get("desc_basepath", ""))
+            card = row.get("link", "").strip() or row.get("card", "").strip()
             if not card or not basepath:
                 continue
-            rows.append({"card": card, "basepath": basepath, "confident": row.get("confident", "").strip()})
+            rows.append({"card": card, "basepath": basepath, "confident": confidence.strip()})
     return rows
 
 
@@ -100,7 +103,7 @@ def main() -> int:
         rows = rows[: args.limit]
 
     mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"{mode}: {len(rows)} row(s) match confident >= {args.confident}")
+    print(f"{mode}: {len(rows)} row(s) match guess_confident >= {args.confident}")
     client = JiraClient(JiraConfig(base_url, email, api_token))
 
     for row in rows:

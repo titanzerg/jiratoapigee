@@ -22,8 +22,18 @@ python3 jira_export.py
 ผลลัพธ์ default คือ `data/jira_export/jira_api_support_export.csv`
 และ default จะ export ทุก card ที่ match เงื่อนไข
 
+ตอน export จะพยายามเพิ่ม column `confident` โดยเทียบ path ใน swagger attachment
+ของ Jira card กับ flow path ใน Apigee ใต้ basepath ที่ดึงได้จริง ถ้ามีหลาย basepath
+จะแสดงเป็น `/basepath=NN%` เพื่อให้เห็นว่า basepath ไหนน่าจะผิด
+
 ```bash
 python3 jira_export.py --output data/jira_export/sosp_export.csv
+```
+
+ถ้าต้องการ export เร็ว ๆ โดยไม่คำนวณ confidence:
+
+```bash
+python3 jira_export.py --skip-confident
 ```
 
 ถ้าต้องการจำกัดจำนวน card:
@@ -65,13 +75,15 @@ python3 jira_export.py --jql 'parent = SOSP-3 AND issuetype in ("Request", "Task
 - `uat`: `true`/`false`, รวมคำว่า `staging` และ `stage`
 - `prod`: `true`/`false`, รวมคำว่า `production`
 - `basepath`: พยายามดึงจาก title + description หลายค่าใช้ comma คั่น
+- `confident`: เปอร์เซ็นต์ path ใน swagger ที่ตรงกับ Apigee flow ใต้ basepath นั้น
 - `create date`: วันที่สร้าง issue จาก Jira
 
 ## Notes
 
-- สคริปต์อ่าน credential จาก environment variable เท่านั้น
+- สคริปต์อ่าน credential จาก environment variable หรือ `.env`
 - เงื่อนไขไฟล์แนบเช็คจาก filename extension `.yaml`, `.yml`, `.json`
-- ไม่ download หรือ parse ไฟล์แนบ เพราะ basepath ใช้จาก title + description ตาม scope ปัจจุบัน
+- `basepath` ยังใช้จาก title + description ตาม scope ปัจจุบัน
+- `confident` ใช้ Apigee sync DB, Apigee bundle cache/API, และ swagger attachment/cache
 
 ## Summarize Latest Card By Environment
 
@@ -175,6 +187,33 @@ column:
 
 ถ้า confidence ต่ำกว่า 50% หรือเดาไม่ได้ จะปล่อย `guess_proxy`, `confident`, และ `desc_basepath` ว่าง
 
+## Guess Low Confidence Basepath
+
+ถ้าต้องการอ่าน `data/jira_export/jira_api_support_export.csv` แล้วเลือกเฉพาะ row ที่
+`confident` ว่างหรือมีค่า `< 70%` เพื่อเดา basepath ที่ใกล้เคียงที่สุด:
+
+```bash
+python3 guess_low_confidence_basepath.py
+```
+
+output default:
+
+```text
+data/guess_low_confidence_basepath/jira_low_confidence_basepath_guess.csv
+```
+
+เปลี่ยน threshold ได้:
+
+```bash
+python3 guess_low_confidence_basepath.py --confident 80
+```
+
+ไฟล์ output จะเก็บ column เดิมจาก `jira_export` และเพิ่ม:
+
+- `guess_basepath`
+- `guess_proxy`
+- `guess_confident`
+
 ## Update Jira Basepath
 
 เพิ่มหรือแก้บรรทัด `basepath: ...` ใน description ของ card:
@@ -189,7 +228,8 @@ python3 updatebasepath SOSP-32172 "/running_club"
 python3 updatebasepath SOSP-32172 "/running_club" --dry-run
 ```
 
-อัปเดตหลาย card จากไฟล์ guess โดยเลือกเฉพาะ confidence ที่ถึง threshold:
+อัปเดตหลาย card จากไฟล์ `data/guess_low_confidence_basepath/jira_low_confidence_basepath_guess.csv`
+โดยเลือกเฉพาะ `guess_confident` ที่ถึง threshold:
 
 ```bash
 python3 updatebasepath_from_guess.py --confident 80

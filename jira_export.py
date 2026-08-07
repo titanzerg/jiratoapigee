@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import io
 import json
 import os
 import re
@@ -13,8 +14,26 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from typing import Any, Iterable
+
+from add_apigee_proxy_name import (
+    DEFAULT_BUNDLE_CACHE_DIR,
+    DEFAULT_ORG,
+    DEFAULT_SWAGGER_CACHE_DIR,
+    ProxyInfo,
+    build_proxy_info_from_db,
+    compare_path,
+    extract_condition_paths,
+    extract_xml_basepaths,
+    get_access_token,
+    get_jira_swagger_paths,
+    load_env_file,
+    normalize_basepath as normalize_apigee_basepath,
+    read_or_download_revision_bundle,
+    remove_basepath_prefix,
+)
 
 
 DEFAULT_BASE_URL = "https://pttep.atlassian.net"
@@ -23,6 +42,18 @@ DEFAULT_OUTPUT = "data/jira_export/jira_api_support_export.csv"
 DEFAULT_ISSUE_TYPES = ("Request", "Task")
 SEARCH_FIELDS = ("summary", "description", "attachment", "created", "issuetype")
 ATTACHMENT_EXTENSIONS = (".yaml", ".yml", ".json")
+
+
+@dataclass
+class ConfidenceContext:
+    org: str
+    env_file: str
+    token: str
+    bundle_cache_dir: str
+    swagger_cache_dir: str
+    proxy_info_by_basepath: dict[str, list[ProxyInfo]]
+    swagger_cache: dict[str, list[str]]
+    flow_cache: dict[tuple[str, str, str], set[str]]
 
 
 @dataclass(frozen=True)
@@ -250,7 +281,11 @@ def clean_basepath(value: str) -> str:
     return cleaned
 
 
-def issue_to_row(base_url: str, issue: dict[str, Any]) -> dict[str, Any]:
+def issue_to_row(
+    base_url: str,
+    issue: dict[str, Any],
+    confidence_context: ConfidenceContext | None = None,
+) -> dict[str, Any]:
     fields = issue.get("fields", {})
     key = issue.get("key", "")
     title = fields.get("summary") or ""
@@ -258,21 +293,133 @@ def issue_to_row(base_url: str, issue: dict[str, Any]) -> dict[str, Any]:
     searchable_text = f"{title}\n{description}"
     explicit_basepaths = extract_explicit_basepaths(description)
     basepaths = explicit_basepaths or extract_basepaths(searchable_text)
+    card_url = f"{base_url.rstrip('/')}/browse/{key}"
 
     return {
-        "link": f"{base_url.rstrip('/')}/browse/{key}",
+        "link": card_url,
         "title": title,
         "dev": detect_environment(searchable_text, "dev"),
         "qa": detect_environment(searchable_text, "qa"),
         "uat": detect_environment(searchable_text, "uat"),
         "prod": detect_environment(searchable_text, "prod"),
         "basepath": ", ".join(basepaths),
+        "confident": issue_confidence(card_url, basepaths, confidence_context),
         "create date": fields.get("created") or "",
     }
 
 
+def create_confidence_context(args: argparse.Namespace) -> ConfidenceContext | None:
+    if args.skip_confident:
+        return None
+
+    try:
+        proxy_info_by_basepath = build_proxy_info_from_db(args.env_file)
+    except Exception as error:
+        print(f"warning: cannot load Apigee basepath map; confident will be blank: {error}", file=sys.stderr)
+        return None
+
+    try:
+        token = get_access_token(args.token)
+    except RuntimeError as error:
+        print(f"warning: {error}", file=sys.stderr)
+        print("warning: continuing with existing Apigee bundle cache only", file=sys.stderr)
+        token = ""
+
+    return ConfidenceContext(
+        org=args.org,
+        env_file=args.env_file,
+        token=token,
+        bundle_cache_dir=args.bundle_cache_dir,
+        swagger_cache_dir=args.swagger_cache_dir,
+        proxy_info_by_basepath=proxy_info_by_basepath,
+        swagger_cache={},
+        flow_cache={},
+    )
+
+
+def issue_confidence(card_url: str, basepaths: list[str], context: ConfidenceContext | None) -> str:
+    if not context or not basepaths:
+        return ""
+
+    try:
+        swagger_paths = get_jira_swagger_paths(
+            card_url,
+            context.env_file,
+            context.swagger_cache,
+            context.swagger_cache_dir,
+        )
+    except Exception as error:
+        print(f"warning: cannot read swagger paths for {card_url}; confident will be blank: {error}", file=sys.stderr)
+        return ""
+
+    if not swagger_paths:
+        return ""
+
+    scores: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for basepath in basepaths:
+        normalized = normalize_apigee_basepath(basepath)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        flow_paths = get_basepath_flow_paths(context, normalized)
+        score = score_confidence(swagger_paths, normalized, flow_paths)
+        if score:
+            scores.append((normalized, score))
+
+    if len(basepaths) == 1:
+        return scores[0][1] if scores else ""
+    return ", ".join(f"{basepath}={score}" for basepath, score in scores)
+
+
+def get_basepath_flow_paths(context: ConfidenceContext, basepath: str) -> set[str]:
+    flow_paths: set[str] = set()
+    for info in context.proxy_info_by_basepath.get(basepath, []):
+        key = (info.proxy, info.revision, basepath)
+        if key not in context.flow_cache:
+            context.flow_cache[key] = read_basepath_flow_paths(context, info, basepath)
+        flow_paths.update(context.flow_cache[key])
+    return flow_paths
+
+
+def read_basepath_flow_paths(context: ConfidenceContext, info: ProxyInfo, basepath: str) -> set[str]:
+    bundle = read_or_download_revision_bundle(
+        context.org,
+        context.token,
+        info.proxy,
+        info.revision,
+        context.bundle_cache_dir,
+    )
+    if not bundle:
+        return set()
+
+    paths: set[str] = set()
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        for name in archive.namelist():
+            if not name.endswith(".xml") or "/proxies/" not in name:
+                continue
+            content = archive.read(name).decode("utf-8", errors="replace")
+            xml_basepaths = extract_xml_basepaths(content)
+            if not any(normalize_apigee_basepath(item) == basepath for item in xml_basepaths):
+                continue
+            paths.update(compare_path(path) for path in extract_condition_paths(content) if compare_path(path))
+    return paths
+
+
+def score_confidence(swagger_paths: list[str], basepath: str, flow_paths: set[str]) -> str:
+    comparable = {
+        compare_path(remove_basepath_prefix(path, basepath))
+        for path in swagger_paths
+        if compare_path(remove_basepath_prefix(path, basepath))
+    }
+    if not comparable or not flow_paths:
+        return ""
+    matched = comparable & flow_paths
+    return f"{round((len(matched) / len(comparable)) * 100)}%"
+
+
 def write_csv(path: str, rows: Iterable[dict[str, Any]]) -> int:
-    fieldnames = ["link", "title", "dev", "qa", "uat", "prod", "basepath", "create date"]
+    fieldnames = ["link", "title", "dev", "qa", "uat", "prod", "basepath", "confident", "create date"]
     count = 0
     ensure_parent_dir(path)
     with open(path, "w", newline="", encoding="utf-8-sig") as output:
@@ -312,6 +459,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jql", help="Override generated JQL completely.")
     parser.add_argument("--issue-key", help="Export one Jira issue key, useful for debugging basepath extraction.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--org", default=os.getenv("APIGEE_ORG"), help="Apigee organization / GCP project id.")
+    parser.add_argument("--token", help="OAuth access token. Defaults to `gcloud auth print-access-token`.")
+    parser.add_argument("--bundle-cache-dir", default=DEFAULT_BUNDLE_CACHE_DIR)
+    parser.add_argument("--swagger-cache-dir", default=DEFAULT_SWAGGER_CACHE_DIR)
+    parser.add_argument("--skip-confident", action="store_true", help="Do not calculate Apigee flow confidence.")
     parser.add_argument("--page-size", type=int, default=100)
     parser.add_argument("--limit", type=int, default=0, help="Maximum matching cards to export. Use 0 for no limit.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between matching rows.")
@@ -320,6 +473,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    env = load_env_file(args.env_file)
+    args.base_url = args.base_url or env.get("JIRA_BASE_URL") or DEFAULT_BASE_URL
+    args.email = args.email or env.get("JIRA_EMAIL")
+    args.api_token = args.api_token or env.get("JIRA_API_TOKEN")
+    args.org = args.org or env.get("APIGEE_ORG") or DEFAULT_ORG
     if not args.email or not args.api_token:
         print("Missing JIRA_EMAIL or JIRA_API_TOKEN.", file=sys.stderr)
         return 2
@@ -327,12 +485,13 @@ def main() -> int:
     issue_types = [value.strip() for value in args.issue_types.split(",") if value.strip()]
     jql = args.jql or build_jql(args.parent, issue_types)
     client = JiraClient(JiraConfig(args.base_url, args.email, args.api_token))
+    confidence_context = create_confidence_context(args)
 
     if args.issue_key:
         issue = client.get_issue(args.issue_key)
         if not has_swagger_attachment(issue):
             print(f"{args.issue_key} has no .yaml/.yml/.json attachment; exporting it anyway for debugging.")
-        count = write_csv(args.output, [issue_to_row(args.base_url, issue)])
+        count = write_csv(args.output, [issue_to_row(args.base_url, issue, confidence_context)])
         print(f"Exported {count} Jira issue(s) to {args.output}")
         return 0
 
@@ -340,7 +499,7 @@ def main() -> int:
         matched = 0
         for issue in client.search_issues(jql, args.page_size):
             if has_swagger_attachment(issue):
-                yield issue_to_row(args.base_url, issue)
+                yield issue_to_row(args.base_url, issue, confidence_context)
                 matched += 1
                 if args.limit and matched >= args.limit:
                     break
