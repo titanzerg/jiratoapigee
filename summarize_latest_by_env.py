@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 from datetime import datetime
 from typing import Any
 
 
-DEFAULT_INPUT = "jira_api_support_export.csv"
-DEFAULT_OUTPUT_PREFIX = "jira_latest_by_basepath"
+DEFAULT_INPUT = "data/jira_export/jira_api_support_export.csv"
+DEFAULT_OUTPUT_PREFIX = "data/summarize_latest_by_env/jira_latest_by_basepath"
 ENVS = ("dev", "qa", "uat", "prod")
 
 
@@ -89,12 +90,19 @@ def write_outputs(summary: dict[str, dict[str, dict[str, Any]]], output_prefix: 
     for env in ENVS:
         output_path = f"{output_prefix}_{env}.csv"
         rows = sorted(summary[env].values(), key=lambda row: row["base path"])
+        ensure_parent_dir(output_path)
         with open(output_path, "w", newline="", encoding="utf-8-sig") as output:
             writer = csv.DictWriter(output, fieldnames=["base path", "card"])
             writer.writeheader()
             for row in rows:
                 writer.writerow({"base path": row["base path"], "card": row["card"]})
         print(f"Wrote {len(rows)} row(s) to {output_path}")
+
+
+def ensure_parent_dir(path: str) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
 
 def main() -> int:

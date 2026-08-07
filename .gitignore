@@ -6,3 +6,5 @@ note.txt
 /certs/
 /apigee_bundle_cache/
 /jira_swagger_path_cache/
+/data/add_apigee_proxy_name/apigee_bundle_cache/
+/data/add_apigee_proxy_name/jira_swagger_path_cache/

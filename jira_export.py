@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 DEFAULT_BASE_URL = "https://pttep.atlassian.net"
 DEFAULT_PARENT = "SOSP-3"
-DEFAULT_OUTPUT = "jira_api_support_export.csv"
+DEFAULT_OUTPUT = "data/jira_export/jira_api_support_export.csv"
 DEFAULT_ISSUE_TYPES = ("Request", "Task")
 SEARCH_FIELDS = ("summary", "description", "attachment", "created", "issuetype")
 ATTACHMENT_EXTENSIONS = (".yaml", ".yml", ".json")
@@ -212,6 +212,23 @@ def extract_basepaths(text: str) -> list[str]:
     return found
 
 
+def extract_explicit_basepaths(text: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(
+        r"\bbase\s*path\b\s*:\s*([^\n\r]+)|\bbasepath\b\s*:\s*([^\n\r]+)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        raw_value = match.group(1) or match.group(2) or ""
+        for item in re.split(r"[,;]", raw_value):
+            candidate = clean_basepath(item)
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                found.append(candidate)
+    return found
+
+
 def strip_markdown_link_targets(text: str) -> str:
     return re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
 
@@ -233,6 +250,8 @@ def issue_to_row(base_url: str, issue: dict[str, Any]) -> dict[str, Any]:
     title = fields.get("summary") or ""
     description = adf_to_text(fields.get("description"))
     searchable_text = f"{title}\n{description}"
+    explicit_basepaths = extract_explicit_basepaths(description)
+    basepaths = explicit_basepaths or extract_basepaths(searchable_text)
 
     return {
         "link": f"{base_url.rstrip('/')}/browse/{key}",
@@ -241,7 +260,7 @@ def issue_to_row(base_url: str, issue: dict[str, Any]) -> dict[str, Any]:
         "qa": detect_environment(searchable_text, "qa"),
         "uat": detect_environment(searchable_text, "uat"),
         "prod": detect_environment(searchable_text, "prod"),
-        "basepath": ", ".join(extract_basepaths(searchable_text)),
+        "basepath": ", ".join(basepaths),
         "create date": fields.get("created") or "",
     }
 
@@ -249,6 +268,7 @@ def issue_to_row(base_url: str, issue: dict[str, Any]) -> dict[str, Any]:
 def write_csv(path: str, rows: Iterable[dict[str, Any]]) -> int:
     fieldnames = ["link", "title", "dev", "qa", "uat", "prod", "basepath", "create date"]
     count = 0
+    ensure_parent_dir(path)
     with open(path, "w", newline="", encoding="utf-8-sig") as output:
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
@@ -262,6 +282,12 @@ def format_csv_value(value: Any) -> Any:
     if isinstance(value, bool):
         return str(value).lower()
     return value
+
+
+def ensure_parent_dir(path: str) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -281,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--issue-key", help="Export one Jira issue key, useful for debugging basepath extraction.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--page-size", type=int, default=100)
-    parser.add_argument("--limit", type=int, default=10, help="Maximum matching cards to export. Use 0 for no limit.")
+    parser.add_argument("--limit", type=int, default=0, help="Maximum matching cards to export. Use 0 for no limit.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between matching rows.")
     return parser.parse_args()
 

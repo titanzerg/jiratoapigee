@@ -19,14 +19,14 @@ export JIRA_BASE_URL="https://pttep.atlassian.net"
 python3 jira_export.py
 ```
 
-ผลลัพธ์ default คือ `jira_api_support_export.csv`
-และ default จะ export แค่ 10 card ก่อน
+ผลลัพธ์ default คือ `data/jira_export/jira_api_support_export.csv`
+และ default จะ export ทุก card ที่ match เงื่อนไข
 
 ```bash
-python3 jira_export.py --output sosp_export.csv
+python3 jira_export.py --output data/jira_export/sosp_export.csv
 ```
 
-ถ้าต้องการเปลี่ยนจำนวน card:
+ถ้าต้องการจำกัดจำนวน card:
 
 ```bash
 python3 jira_export.py --limit 50
@@ -41,7 +41,7 @@ python3 jira_export.py --limit 0
 ถ้าต้องการทดสอบ card เดียว:
 
 ```bash
-python3 jira_export.py --issue-key SOSP-32465 --output sosp_32465.csv
+python3 jira_export.py --issue-key SOSP-32465 --output data/jira_export/sosp_32465.csv
 ```
 
 ถ้าชื่อ issue type ใน Jira ไม่ตรง `Request` หรือ `Task` ให้ override ได้:
@@ -75,7 +75,7 @@ python3 jira_export.py --jql 'parent = SOSP-3 AND issuetype in ("Request", "Task
 
 ## Summarize Latest Card By Environment
 
-หลังจากได้ `jira_api_support_export.csv` แล้ว สร้าง CSV แยกตาม env ได้ด้วย:
+หลังจากได้ `data/jira_export/jira_api_support_export.csv` แล้ว สร้าง CSV แยกตาม env ได้ด้วย:
 
 ```bash
 python3 summarize_latest_by_env.py
@@ -83,10 +83,10 @@ python3 summarize_latest_by_env.py
 
 ไฟล์ output:
 
-- `jira_latest_by_basepath_dev.csv`
-- `jira_latest_by_basepath_qa.csv`
-- `jira_latest_by_basepath_uat.csv`
-- `jira_latest_by_basepath_prod.csv`
+- `data/summarize_latest_by_env/jira_latest_by_basepath_dev.csv`
+- `data/summarize_latest_by_env/jira_latest_by_basepath_qa.csv`
+- `data/summarize_latest_by_env/jira_latest_by_basepath_uat.csv`
+- `data/summarize_latest_by_env/jira_latest_by_basepath_prod.csv`
 
 แต่ละไฟล์มี column:
 
@@ -95,7 +95,7 @@ python3 summarize_latest_by_env.py
 
 ## Add Apigee Proxy Name
 
-หลังจากมีไฟล์ `jira_latest_by_basepath_{env}.csv` แล้ว เพิ่มชื่อ proxy จาก Apigee ได้ด้วย:
+หลังจากมีไฟล์ `data/summarize_latest_by_env/jira_latest_by_basepath_{env}.csv` แล้ว เพิ่มชื่อ proxy จาก Apigee ได้ด้วย:
 
 ```bash
 python3 add_apigee_proxy_name.py
@@ -103,14 +103,15 @@ python3 add_apigee_proxy_name.py
 
 สคริปต์จะอ่าน DB config จาก `.env` (`APIGEE_SYNC_DB_*`), query table
 `apigee.apigee_proxy_endpoints`, map `base path` กับ `proxy_name`,
-สร้าง cache ที่ `apigee_basepath_proxy_map.csv`, แล้วเขียน output:
+สร้าง cache ที่ `data/add_apigee_proxy_name/apigee_basepath_proxy_map.csv`, แล้วเขียน output:
 
-- `jira_latest_by_basepath_dev_with_proxy.csv`
-- `jira_latest_by_basepath_qa_with_proxy.csv`
-- `jira_latest_by_basepath_uat_with_proxy.csv`
-- `jira_latest_by_basepath_prod_with_proxy.csv`
+- `data/add_apigee_proxy_name/jira_latest_by_basepath_dev_with_proxy.csv`
+- `data/add_apigee_proxy_name/jira_latest_by_basepath_qa_with_proxy.csv`
+- `data/add_apigee_proxy_name/jira_latest_by_basepath_uat_with_proxy.csv`
+- `data/add_apigee_proxy_name/jira_latest_by_basepath_prod_with_proxy.csv`
 
 บรรทัดที่ map proxy ไม่ได้จะปล่อย column `proxy` ว่างไว้
+ยกเว้นกรณี card เดียวกันมี basepath อื่นที่ map proxy ได้แล้ว แถว basepath ที่ map ไม่ได้ของ card นั้นจะถูกซ่อนไม่เขียนลงไฟล์ `_with_proxy.csv`
 
 ถ้ามี cache แล้วอยาก join CSV ใหม่โดยไม่ยิง Apigee API ซ้ำ:
 
@@ -132,13 +133,13 @@ mode นี้จะเพิ่ม column `confident` โดยเทียบ 
 ตอนใช้ `--source api` สคริปต์จะ cache revision bundle zip ไว้ใน folder:
 
 ```text
-apigee_bundle_cache/
+data/add_apigee_proxy_name/apigee_bundle_cache/
 ```
 
 และ cache swagger paths จาก Jira ไว้ใน folder:
 
 ```text
-jira_swagger_path_cache/
+data/add_apigee_proxy_name/jira_swagger_path_cache/
 ```
 
 รอบถัดไปจะอ่านจาก folder cache ก่อน ถ้าไม่มีไฟล์ค่อยโหลดใหม่
@@ -147,4 +148,55 @@ jira_swagger_path_cache/
 
 ```bash
 python3 add_apigee_proxy_name.py --source api --bundle-cache-dir /path/to/bundle-cache --swagger-cache-dir /path/to/swagger-cache
+```
+
+## Guess Missing Proxy
+
+ถ้าต้องการเดา proxy สำหรับ row ที่ `proxy` ว่างในไฟล์ `data/add_apigee_proxy_name/jira_latest_by_basepath_*_with_proxy.csv`:
+
+```bash
+python3 guess_missing_proxy.py
+```
+
+output default:
+
+```text
+data/guess_missing_proxy/jira_missing_proxy_guess.csv
+```
+
+column:
+
+- `card`
+- `guess_proxy`
+- `confident`
+- `desc_basepath`
+
+`desc_basepath` เป็นข้อความสำหรับ copy ไปใส่ description เช่น `basepath: /xxx`
+
+ถ้า confidence ต่ำกว่า 50% หรือเดาไม่ได้ จะปล่อย `guess_proxy`, `confident`, และ `desc_basepath` ว่าง
+
+## Update Jira Basepath
+
+เพิ่มหรือแก้บรรทัด `basepath: ...` ใน description ของ card:
+
+```bash
+python3 updatebasepath SOSP-32172 "/running_club"
+```
+
+ลองก่อนโดยยังไม่ update จริง:
+
+```bash
+python3 updatebasepath SOSP-32172 "/running_club" --dry-run
+```
+
+อัปเดตหลาย card จากไฟล์ guess โดยเลือกเฉพาะ confidence ที่ถึง threshold:
+
+```bash
+python3 updatebasepath_from_guess.py --confident 80
+```
+
+คำสั่งด้านบนเป็น dry-run default ถ้าจะ update จริง:
+
+```bash
+python3 updatebasepath_from_guess.py --confident 80 --apply
 ```

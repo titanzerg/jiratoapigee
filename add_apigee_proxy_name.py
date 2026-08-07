@@ -22,10 +22,11 @@ from typing import Any
 
 
 DEFAULT_ORG = "gcp-pttep-th-it-apimgmt"
-DEFAULT_INPUT_PREFIX = "jira_latest_by_basepath"
+DEFAULT_INPUT_PREFIX = "data/summarize_latest_by_env/jira_latest_by_basepath"
+DEFAULT_OUTPUT_PREFIX = "data/add_apigee_proxy_name/jira_latest_by_basepath"
 DEFAULT_OUTPUT_SUFFIX = "_with_proxy"
-DEFAULT_BUNDLE_CACHE_DIR = "apigee_bundle_cache"
-DEFAULT_SWAGGER_CACHE_DIR = "jira_swagger_path_cache"
+DEFAULT_BUNDLE_CACHE_DIR = "data/add_apigee_proxy_name/apigee_bundle_cache"
+DEFAULT_SWAGGER_CACHE_DIR = "data/add_apigee_proxy_name/jira_swagger_path_cache"
 ENVS = ("dev", "qa", "uat", "prod")
 
 
@@ -39,11 +40,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Map Jira base paths to Apigee proxy names.")
     parser.add_argument("--org", default=DEFAULT_ORG, help="Apigee organization / GCP project id.")
     parser.add_argument("--input-prefix", default=DEFAULT_INPUT_PREFIX)
+    parser.add_argument("--output-prefix", default=DEFAULT_OUTPUT_PREFIX)
     parser.add_argument("--output-suffix", default=DEFAULT_OUTPUT_SUFFIX)
     parser.add_argument("--source", choices=("db", "api"), default="db")
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--token", help="OAuth access token. Defaults to `gcloud auth print-access-token`.")
-    parser.add_argument("--cache", default="apigee_basepath_proxy_map.csv")
+    parser.add_argument("--cache", default="data/add_apigee_proxy_name/apigee_basepath_proxy_map.csv")
     parser.add_argument("--bundle-cache-dir", default=DEFAULT_BUNDLE_CACHE_DIR)
     parser.add_argument("--swagger-cache-dir", default=DEFAULT_SWAGGER_CACHE_DIR)
     parser.add_argument("--use-cache", action="store_true", help="Skip Apigee API and reuse --cache.")
@@ -459,6 +461,12 @@ def add_ssl_query_params(db_url: str, params: dict[str, str]) -> str:
     return db_url + separator + query
 
 
+def ensure_parent_dir(path: str) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+
 def get_jira_swagger_paths(
     card_url: str,
     env_file: str,
@@ -606,6 +614,7 @@ def read_proxy_map(path: str) -> dict[str, list[str]]:
 
 
 def write_proxy_map(path: str, mapping: dict[str, list[str]]) -> None:
+    ensure_parent_dir(path)
     with open(path, "w", newline="", encoding="utf-8-sig") as output:
         writer = csv.DictWriter(output, fieldnames=["base path", "proxy"])
         writer.writeheader()
@@ -616,6 +625,7 @@ def write_proxy_map(path: str, mapping: dict[str, list[str]]) -> None:
 
 def add_proxy_to_env_files(
     input_prefix: str,
+    output_prefix: str,
     output_suffix: str,
     proxy_map: dict[str, list[str]],
     proxy_info_map: dict[str, list[ProxyInfo]] | None = None,
@@ -625,14 +635,27 @@ def add_proxy_to_env_files(
     swagger_cache_dir: str = DEFAULT_SWAGGER_CACHE_DIR,
     env_file: str = ".env",
 ) -> None:
-    with_confidence = proxy_info_map is not None and bool(apigee_token)
+    with_confidence = proxy_info_map is not None
     swagger_cache: dict[str, list[str]] = {}
     flow_cache: dict[tuple[str, str], list[str]] = {}
 
     for env in ENVS:
         input_path = f"{input_prefix}_{env}.csv"
-        output_path = f"{input_prefix}_{env}{output_suffix}.csv"
+        output_path = f"{output_prefix}_{env}{output_suffix}.csv"
+        input_rows: list[dict[str, str]] = []
+        cards_with_proxy: set[str] = set()
+        with open(input_path, newline="", encoding="utf-8-sig") as source:
+            reader = csv.DictReader(source)
+            fieldnames = list(reader.fieldnames or [])
+            for row in reader:
+                basepath = normalize_basepath(row.get("base path", ""))
+                row["proxy"] = ", ".join(proxy_map.get(basepath, []))
+                if row["proxy"].strip():
+                    cards_with_proxy.add(row.get("card", "").strip())
+                input_rows.append(row)
+
         count = 0
+        ensure_parent_dir(output_path)
         with open(input_path, newline="", encoding="utf-8-sig") as source, open(
             output_path, "w", newline="", encoding="utf-8-sig"
         ) as output:
@@ -644,12 +667,13 @@ def add_proxy_to_env_files(
                 fieldnames.append("confident")
             writer = csv.DictWriter(output, fieldnames=fieldnames)
             writer.writeheader()
-            for row in reader:
+            for row in input_rows:
+                if not row.get("proxy", "").strip() and row.get("card", "").strip() in cards_with_proxy:
+                    continue
                 count += 1
                 if with_confidence and count % 50 == 0:
                     print(f"{env}: processed {count} row(s)", file=sys.stderr)
                 basepath = normalize_basepath(row.get("base path", ""))
-                row["proxy"] = ", ".join(proxy_map.get(basepath, []))
                 if with_confidence:
                     row["confident"] = calculate_confidence(
                         basepath,
@@ -679,11 +703,17 @@ def main() -> int:
     else:
         proxy_info_map = build_proxy_info_from_db(args.env_file)
         proxy_map = {basepath: [item.proxy for item in infos] for basepath, infos in proxy_info_map.items()}
-        apigee_token = get_access_token(args.token)
+        try:
+            apigee_token = get_access_token(args.token)
+        except RuntimeError as error:
+            print(f"warning: {error}", file=sys.stderr)
+            print("warning: continuing with existing Apigee bundle cache only", file=sys.stderr)
+            apigee_token = ""
         write_proxy_map(args.cache, proxy_map)
 
     add_proxy_to_env_files(
         args.input_prefix,
+        args.output_prefix,
         args.output_suffix,
         proxy_map,
         proxy_info_map=proxy_info_map,
