@@ -187,6 +187,33 @@ column:
 
 ถ้า confidence ต่ำกว่า 50% หรือเดาไม่ได้ จะปล่อย `guess_proxy`, `confident`, และ `desc_basepath` ว่าง
 
+## Export Deployed Apigee Proxies
+
+ดึง proxy revision ที่ deploy อยู่จาก Apigee แล้วสร้าง CSV ของ basepath ที่พบใน bundle:
+
+```bash
+python3 export_deployed_apigee_proxies.py
+```
+
+output default:
+
+```text
+data/export_deployed_apigee_proxies/apigee_deployed_proxy_basepaths.csv
+```
+
+column:
+
+- `proxy_name`
+- `basepath`
+- `card`: map จาก `data/add_apigee_proxy_name/jira_latest_by_basepath_uat_with_proxy.csv` เท่าที่หาได้
+- `confident`: เทียบ flow path ใต้ basepath กับ swagger attachment ของ card ที่ map ได้
+
+ทดสอบแบบจำกัดจำนวน deployed revision:
+
+```bash
+python3 export_deployed_apigee_proxies.py --limit 10
+```
+
 ## Guess Low Confidence Basepath
 
 ถ้าต้องการอ่าน `data/jira_export/jira_api_support_export.csv` แล้วเลือกเฉพาะ row ที่
