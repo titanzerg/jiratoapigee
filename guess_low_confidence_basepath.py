@@ -8,6 +8,7 @@ import csv
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 
 from add_apigee_proxy_name import (
@@ -24,12 +25,20 @@ from guess_missing_proxy import (
     build_flow_index,
     build_proxy_basepaths,
     flatten_proxy_infos,
-    guess_for_card,
+    format_desc_basepath,
+    score_basepath,
 )
 
 
 DEFAULT_INPUT = "data/jira_export/jira_api_support_export.csv"
 DEFAULT_OUTPUT = "data/guess_low_confidence_basepath/jira_low_confidence_basepath_guess.csv"
+
+
+@dataclass
+class BasepathGuess:
+    basepath: str = ""
+    proxy: str = ""
+    confidence: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +131,44 @@ def write_output(path: str, rows: list[dict[str, str]], input_fieldnames: list[s
             writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
+def guess_basepath_for_card(
+    card: str,
+    flow_index: dict,
+    basepath_flow_index: dict,
+    proxy_basepaths: dict[str, list[str]],
+    env_file: str,
+    swagger_cache_dir: str,
+    swagger_cache: dict[str, list[str]],
+) -> BasepathGuess:
+    swagger_paths = get_jira_swagger_paths(card, env_file, swagger_cache, swagger_cache_dir)
+    if not swagger_paths:
+        return BasepathGuess()
+
+    best = BasepathGuess()
+    best_score = (0, 0, 0, 0)
+    for info, proxy_flow_paths in flow_index.items():
+        flow_paths_by_basepath = basepath_flow_index.get(info, {})
+        for basepath in proxy_basepaths.get(info.proxy, []):
+            normalized = normalize_basepath(basepath)
+            flow_paths = flow_paths_by_basepath.get(normalized, set()) if flow_paths_by_basepath else proxy_flow_paths
+            score = score_basepath(swagger_paths, normalized, flow_paths)
+            if score[0] <= 0:
+                continue
+            if score > best_score or (score == best_score and prefer_basepath(normalized, best.basepath)):
+                best_score = score
+                best = BasepathGuess(basepath=normalized, proxy=info.proxy, confidence=score[0])
+
+    return best
+
+
+def prefer_basepath(candidate: str, current: str) -> bool:
+    if not current:
+        return True
+    if len(candidate) != len(current):
+        return len(candidate) < len(current)
+    return candidate < current
+
+
 def main() -> int:
     args = parse_args()
     selected_rows = read_selected_rows(args.input, args.confident)
@@ -154,10 +201,8 @@ def main() -> int:
             print(f"guessed {index}/{total} row(s)", file=sys.stderr)
 
         card = row.get("link", "").strip()
-        basepaths = split_basepaths(row.get("basepath", ""))
-        guess = guess_for_card(
+        guess = guess_basepath_for_card(
             card,
-            basepaths,
             flow_index,
             basepath_flow_index,
             proxy_basepaths,
@@ -167,7 +212,7 @@ def main() -> int:
         )
 
         output_row = dict(row)
-        output_row["guess_basepath"] = guess.desc_basepath.removeprefix("basepath: ").strip()
+        output_row["guess_basepath"] = format_desc_basepath([guess.basepath]).removeprefix("basepath: ").strip()
         output_row["guess_proxy"] = guess.proxy
         output_row["guess_confident"] = f"{guess.confidence}%" if guess.confidence > 0 else ""
         output_rows.append(output_row)
