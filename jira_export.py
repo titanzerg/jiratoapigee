@@ -190,14 +190,15 @@ def detect_environment(text: str, env: str) -> bool:
 
 def extract_basepaths(text: str) -> list[str]:
     text = strip_markdown_link_targets(text)
+    text = re.sub(r"/https?://[^\s)\]>'\"]+", " ", text, flags=re.IGNORECASE)
     patterns = [
-        r"\b(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?/\s*([a-z][\w{}.$~%+\-:,;@*]*(?:/[\w{}.$~%+\-:,;@*]+)+)",
+        r"(?<!/)\b(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?/\s*([a-z][\w{}.$~%+\-:,;@*]*(?:/[\w{}.$~%+\-:,;@*]+)+)",
         r"\bbase\s*path\b\s*(?:[:=\-]|is|คือ)?\s*([/\w{}.$~%+\-:,;@*]+)",
         r"\bbasepath\b\s*(?:[:=\-]|is|คือ)?\s*([/\w{}.$~%+\-:,;@*]+)",
         r"\bcontext\s*path\b\s*(?:[:=\-]|is|คือ)?\s*([/\w{}.$~%+\-:,;@*]+)",
         r"\bpath\b\s*(?:[:=\-]|is|คือ)?\s*([/\w{}.$~%+\-:,;@*]+)",
-        r"https?://[^/\s)\]>'\"]+(/[\w{}.$~%+\-:,;@*/]+)",
-        r"\b(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(/[\w{}.$~%+\-:,;@*/]+)",
+        r"(?<!/)https?://[^/\s)\]>'\"]+(/[\w{}.$~%+\-:,;@*/]+)",
+        r"(?<!/)\b(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(/[\w{}.$~%+\-:,;@*/]+)",
         r"(?<![\w.-])(/(?:api|apis|apigee|apim|v\d+|[a-z][\w-]+)(?:/[\w{}.$~%+\-:,;@*]+)+)",
     ]
 
@@ -213,19 +214,22 @@ def extract_basepaths(text: str) -> list[str]:
 
 
 def extract_explicit_basepaths(text: str) -> list[str]:
-    found: list[str] = []
-    seen: set[str] = set()
-    for match in re.finditer(
+    matches = list(re.finditer(
         r"\bbase\s*path\b\s*:\s*([^\n\r]+)|\bbasepath\b\s*:\s*([^\n\r]+)",
         text,
         flags=re.IGNORECASE,
-    ):
-        raw_value = match.group(1) or match.group(2) or ""
-        for item in re.split(r"[,;]", raw_value):
-            candidate = clean_basepath(item)
-            if candidate and candidate not in seen:
-                seen.add(candidate)
-                found.append(candidate)
+    ))
+    if not matches:
+        return []
+
+    raw_value = matches[-1].group(1) or matches[-1].group(2) or ""
+    found: list[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[,;]", raw_value):
+        candidate = clean_basepath(item)
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            found.append(candidate)
     return found
 
 
@@ -235,6 +239,8 @@ def strip_markdown_link_targets(text: str) -> str:
 
 def clean_basepath(value: str) -> str:
     cleaned = value.strip().rstrip(".,;:)]}'\"")
+    if re.match(r"^/https?://", cleaned, flags=re.IGNORECASE):
+        return ""
     if cleaned and not cleaned.startswith("/") and "/" in cleaned:
         cleaned = "/" + cleaned
     if not cleaned.startswith("/"):
