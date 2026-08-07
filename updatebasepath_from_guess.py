@@ -15,7 +15,14 @@ from jira_export import JiraClient, JiraConfig
 
 
 def load_updatebasepath_module():
-    path = os.path.join(os.path.dirname(__file__), "updatebasepath")
+    base_dir = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(base_dir, "updatebasepath.py"),
+        os.path.join(base_dir, "updatebasepath"),
+    ]
+    path = next((candidate for candidate in candidates if os.path.exists(candidate)), "")
+    if not path:
+        raise RuntimeError("Cannot find updatebasepath.py or updatebasepath helper")
     loader = SourceFileLoader("updatebasepath_script", path)
     spec = spec_from_loader(loader.name, loader)
     if spec is None:
